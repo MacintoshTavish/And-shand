@@ -543,12 +543,13 @@ def _extract_menu_items(obj, items, depth=0, current_category=""):
             if choices:
                 addon_groups.append({"name": group_name, "choices": choices})
 
-        # Extract variants
+        # Extract variants — unlike item/addon prices (paise), variation
+        # prices arrive in rupees already
         variants = []
         for vg in info.get("variantsV2", {}).get("variantGroups", []):
             group_name = vg.get("name", "")
             for v in vg.get("variations", []):
-                v_price = (v.get("price") or 0) / 100
+                v_price = float(v.get("price") or 0)
                 variants.append({
                     "name": f"{group_name}: {v.get('name', '')}",
                     "price": v_price,
