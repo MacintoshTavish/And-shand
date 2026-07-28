@@ -190,7 +190,7 @@ class SwiggySession:
     def _auto_extract_cookies(self):
         """Try to automatically extract Swiggy cookies from installed browsers.
 
-        Uses browser_cookie3 to read cookies from Chrome, Firefox, Safari, Edge.
+        Uses browser_cookie3 to read cookies from Chrome or Firefox.
         On macOS, Chrome will trigger a Keychain prompt on first use — click Allow.
         Returns True if cookies were found and loaded.
         """
@@ -199,7 +199,6 @@ class SwiggySession:
         except ImportError:
             return False
 
-        # Try Chrome and Firefox only
         browsers = [
             ("Chrome", browser_cookie3.chrome),
             ("Firefox", browser_cookie3.firefox),
@@ -223,42 +222,32 @@ class SwiggySession:
         print("\r  No Swiggy cookies found in any browser.       ")
         return False
 
+    @staticmethod
+    def _make_cookie(name, value):
+        return http.cookiejar.Cookie(
+            version=0, name=name, value=value,
+            port=None, port_specified=False,
+            domain=".swiggy.com", domain_specified=True,
+            domain_initial_dot=True,
+            path="/", path_specified=True,
+            secure=True, expires=int(time.time()) + 86400 * 30,
+            discard=False, comment=None, comment_url=None,
+            rest={}, rfc2109=False,
+        )
+
     def _import_cookie_string(self, cookie_input):
         """Parse and import a manually pasted cookie string."""
         self.cookie_jar.clear()
 
         if "=" in cookie_input:
-            pairs = cookie_input.split(";")
-            for pair in pairs:
+            for pair in cookie_input.split(";"):
                 pair = pair.strip()
                 if "=" not in pair:
                     continue
                 name, _, value = pair.partition("=")
-                name = name.strip()
-                value = value.strip()
-                cookie = http.cookiejar.Cookie(
-                    version=0, name=name, value=value,
-                    port=None, port_specified=False,
-                    domain=".swiggy.com", domain_specified=True,
-                    domain_initial_dot=True,
-                    path="/", path_specified=True,
-                    secure=True, expires=int(time.time()) + 86400 * 30,
-                    discard=False, comment=None, comment_url=None,
-                    rest={}, rfc2109=False,
-                )
-                self.cookie_jar.set_cookie(cookie)
+                self.cookie_jar.set_cookie(self._make_cookie(name.strip(), value.strip()))
         else:
-            cookie = http.cookiejar.Cookie(
-                version=0, name="__SW", value=cookie_input,
-                port=None, port_specified=False,
-                domain=".swiggy.com", domain_specified=True,
-                domain_initial_dot=True,
-                path="/", path_specified=True,
-                secure=True, expires=int(time.time()) + 86400 * 30,
-                discard=False, comment=None, comment_url=None,
-                rest={}, rfc2109=False,
-            )
-            self.cookie_jar.set_cookie(cookie)
+            self.cookie_jar.set_cookie(self._make_cookie("__SW", cookie_input))
 
     def _verify_session(self):
         """Verify cookies work and save if valid."""
@@ -525,7 +514,7 @@ def _extract_menu_items(obj, items, depth=0, current_category=""):
              or obj.get("card", {}).get("info", {}).get("title", ""))
     if title and isinstance(title, str) and len(title) < 60:
         cat_type = obj.get("@type", "") or obj.get("card", {}).get("card", {}).get("@type", "")
-        if "ItemCategory" in cat_type or "NestedItemCategory" in cat_type or not cat_type:
+        if "ItemCategory" in cat_type or not cat_type:
             current_category = title
 
     info = obj.get("card", {}).get("info", {}) if "card" in obj else obj.get("info", {})
