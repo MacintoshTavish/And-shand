@@ -525,25 +525,28 @@ def parse_discount(discount_info):
     result = {"description": desc, "type": None, "percent": 0, "max_discount": 0,
               "flat_off": 0, "min_order": 0, "items_at": 0}
 
-    min_match = re.search(r'ABOVE\s*₹?\s*(\d+)', sub) or re.search(r'ABOVE\s*₹?\s*(\d+)', header)
+    text = f"{header} {sub}"
+
+    min_match = re.search(r'ABOVE\s*₹?\s*(\d+)', text)
     if min_match:
         result["min_order"] = int(min_match.group(1))
 
-    items_at = re.search(r'AT\s*₹?\s*(\d+)', sub) or re.search(r'AT\s*₹?\s*(\d+)', header)
-    if items_at and "ITEMS" in (header + " " + sub):
+    # \bAT\b so the AT inside "FLAT ₹120 OFF" can't match
+    items_at = re.search(r'\bAT\b\s*₹?\s*(\d+)', text)
+    if items_at and "ITEMS" in text:
         result["type"] = "items_at"
         result["items_at"] = int(items_at.group(1))
         return result
 
-    pct_match = re.search(r'(\d+)%\s*OFF\s*(?:UPTO|UP\s*TO)\s*₹?\s*(\d+)', header + " " + sub)
+    pct_match = re.search(r'(\d+)%\s*OFF\s*(?:UPTO|UP\s*TO)\s*₹?\s*(\d+)', text)
     if pct_match:
         result["type"] = "percent_capped"
         result["percent"] = int(pct_match.group(1))
         result["max_discount"] = int(pct_match.group(2))
         return result
 
-    pct_h = re.search(r'(\d+)%\s*OFF', header)
-    cap_s = re.search(r'UPTO\s*₹?\s*(\d+)', sub)
+    pct_h = re.search(r'(\d+)%\s*OFF', text)
+    cap_s = re.search(r'UPTO\s*₹?\s*(\d+)', text)
     if pct_h and cap_s:
         result["type"] = "percent_capped"
         result["percent"] = int(pct_h.group(1))
@@ -555,23 +558,17 @@ def parse_discount(discount_info):
         result["percent"] = int(pct_h.group(1))
         return result
 
-    flat_match = re.search(r'FLAT\s*₹?\s*(\d+)\s*OFF', header)
+    flat_match = re.search(r'FLAT\s*₹?\s*(\d+)\s*OFF', text) or re.search(r'₹\s*(\d+)\s*OFF', text)
     if flat_match:
         result["type"] = "flat"
         result["flat_off"] = int(flat_match.group(1))
         return result
 
-    off_match = re.search(r'₹\s*(\d+)\s*OFF', header)
-    if off_match:
-        result["type"] = "flat"
-        result["flat_off"] = int(off_match.group(1))
-        return result
-
-    if "BUY 1 GET 1" in header or "BOGO" in header or "B1G1" in header:
+    if "BUY 1 GET 1" in text or "BOGO" in text or "B1G1" in text:
         result["type"] = "bogo"
         return result
 
-    if "FREE DELIVERY" in header:
+    if "FREE DELIVERY" in text:
         result["type"] = "free_delivery"
         return result
 
