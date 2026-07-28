@@ -1079,6 +1079,7 @@ def filter_loop(results, num_people, lat, lng, veg_pref):
 
 def process_restaurants(restaurants, num_people, veg_pref):
     results = []
+    skipped_closed = 0
 
     for rest in restaurants:
         rest_name = rest.get("name", "Unknown")
@@ -1087,9 +1088,24 @@ def process_restaurants(restaurants, num_people, veg_pref):
         cuisines = ", ".join(cuisines_list[:3])
 
         if veg_pref == "nonveg":
+            # API's own pure-veg flag, cuisine tags as fallback
+            if rest.get("veg") is True:
+                continue
             veg_tags = {"Pure Veg", "Vegan"}
             if veg_tags & set(cuisines_list):
                 continue
+
+        sla = rest.get("sla", {})
+        if rest.get("isOpen") is False or sla.get("serviceability") in (
+                "NON_SERVICEABLE", "UNSERVICEABLE"):
+            skipped_closed += 1
+            continue
+
+        # Actual delivery fee when Swiggy provides it (paise)
+        delivery_fee = None
+        total_fee = rest.get("feeDetails", {}).get("totalFee")
+        if isinstance(total_fee, (int, float)):
+            delivery_fee = total_fee / 100
 
         cost_str = rest.get("costForTwo", "")
         cost_match = re.search(r'(\d+)', cost_str)
@@ -1108,7 +1124,13 @@ def process_restaurants(restaurants, num_people, veg_pref):
         else:
             final, savings = apply_discount(original, discount)
 
-        est_checkout = estimate_checkout_price(final)
+        delivery_free = bool(
+            discount and discount["type"] == "free_delivery"
+            and final >= discount.get("min_order", 0))
+        est_checkout = estimate_checkout_price(final, delivery_fee=delivery_fee,
+                                               delivery_free=delivery_free)
+        if delivery_free:
+            savings += delivery_fee if delivery_fee is not None else AVG_DELIVERY_FEE
 
         results.append({
             "rest_id": rest_id,
@@ -1118,13 +1140,14 @@ def process_restaurants(restaurants, num_people, veg_pref):
             "est_checkout": est_checkout,
             "savings": savings,
             "offer_text": offer_text,
-            "delivery_time": rest.get("sla", {}).get("deliveryTime", "?"),
+            "delivery_fee": delivery_fee,
+            "delivery_time": sla.get("deliveryTime", "?"),
             "cuisines": cuisines,
             "rating": rest.get("avgRating", "?"),
         })
 
     results.sort(key=lambda x: x["est_checkout"])
-    return results
+    return results, skipped_closed
 
 def main():
     print_header()
@@ -1225,7 +1248,9 @@ def main():
             else:
                 print(colored(f"  No matches for '{rest_pref}', showing all", C.YELLOW))
 
-        results = process_restaurants(restaurants, num_people, veg_pref)
+        results, skipped_closed = process_restaurants(restaurants, num_people, veg_pref)
+        if skipped_closed:
+            print(colored(f"  Skipped {skipped_closed} closed/unserviceable restaurants", C.DIM))
 
         if not results:
             print(colored("  No results after filtering.", C.RED))
