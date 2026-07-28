@@ -42,16 +42,39 @@ def pad(text, width, color=None, align="<"):
     text = f"{text:{align}{width}}"
     return colored(text, color) if color else text
 
-# ─── SSL Context (macOS Python fix) ──────────────────────────────────────────
+# ─── SSL Context ─────────────────────────────────────────────────────────────
 
-SSL_CTX = ssl.create_default_context()
-SSL_CTX.check_hostname = False
-SSL_CTX.verify_mode = ssl.CERT_NONE
+def build_ssl_context(insecure=False):
+    """Verified TLS by default; unverified only on request.
+
+    macOS python.org builds often miss root certs — the session falls
+    back automatically (with a warning) if verification fails.
+    """
+    ctx = ssl.create_default_context()
+    if insecure:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 # ─── Session Config ──────────────────────────────────────────────────────────
 
 SESSION_DIR = os.path.expanduser("~/.swiggy-deals")
 COOKIE_FILE = os.path.join(SESSION_DIR, "cookies.txt")
+CONFIG_FILE = os.path.join(SESSION_DIR, "config.json")
+
+def load_config():
+    try:
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:
+        pass
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -62,39 +85,48 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 class SwiggySession:
     """Manages authenticated Swiggy session with cookie persistence."""
 
-    def __init__(self):
+    def __init__(self, insecure=False):
         os.makedirs(SESSION_DIR, exist_ok=True)
         self.cookie_jar = http.cookiejar.MozillaCookieJar(COOKIE_FILE)
         self.csrf_token = None
         self.logged_in = False
-
-        # Build opener with cookie handling
-        cookie_handler = urllib.request.HTTPCookieProcessor(self.cookie_jar)
-        https_handler = urllib.request.HTTPSHandler(context=SSL_CTX)
-        self.opener = urllib.request.build_opener(cookie_handler, https_handler)
+        self.insecure = insecure
+        self.last_error = None
+        self._build_opener()
 
         # Try loading saved session
         self._load_session()
+
+    def _build_opener(self):
+        cookie_handler = urllib.request.HTTPCookieProcessor(self.cookie_jar)
+        https_handler = urllib.request.HTTPSHandler(context=build_ssl_context(self.insecure))
+        self.opener = urllib.request.build_opener(cookie_handler, https_handler)
 
     def _load_session(self):
         """Load cookies from disk if they exist."""
         if os.path.exists(COOKIE_FILE):
             try:
                 self.cookie_jar.load(ignore_discard=True, ignore_expires=True)
-                if len(self.cookie_jar) > 0:
-                    self.logged_in = True
+                # Only the login cookie counts — a cookie file alone doesn't
+                self.logged_in = any(c.name == "_is_logged_in" and c.value == "true"
+                                     for c in self.cookie_jar)
             except Exception:
                 self.logged_in = False
 
     def _save_session(self):
-        """Save cookies to disk."""
+        """Save cookies to disk, private to this user."""
         try:
             self.cookie_jar.save(ignore_discard=True, ignore_expires=True)
-        except Exception:
-            pass
+            os.chmod(COOKIE_FILE, 0o600)
+        except OSError as e:
+            print(colored(f"  Warning: could not save session ({e})", C.YELLOW))
 
     def _request(self, url, data=None, method=None, retries=2):
-        """Make an HTTP request through the session."""
+        """Make an HTTP request through the session.
+
+        Returns parsed JSON or None; on None, self.last_error says why.
+        Only retries errors that can plausibly succeed on retry.
+        """
         headers = {
             "User-Agent": UA,
             "Accept": "application/json, text/plain, */*",
@@ -109,22 +141,46 @@ class SwiggySession:
             elif isinstance(data, str):
                 data = data.encode()
 
+        self.last_error = None
         for attempt in range(retries + 1):
             req = urllib.request.Request(url, data=data, headers=headers, method=method)
             try:
                 resp = self.opener.open(req, timeout=15)
                 raw = resp.read().decode()
                 if not raw:
+                    self.last_error = "empty response from Swiggy"
                     return None
-                return json.loads(raw)
+                try:
+                    return json.loads(raw)
+                except ValueError:
+                    self.last_error = "non-JSON response — likely a block/captcha page"
+                    return None
             except urllib.error.HTTPError as e:
-                if attempt < retries:
-                    time.sleep(1)
+                if e.code == 403:
+                    self.last_error = "HTTP 403 — Swiggy is blocking this IP/session"
+                    return None
+                self.last_error = f"HTTP {e.code}"
+                if e.code in (429, 500, 502, 503) and attempt < retries:
+                    time.sleep(1.5 * (attempt + 1))
                     continue
                 return None
-            except Exception:
+            except urllib.error.URLError as e:
+                if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError) \
+                        and not self.insecure:
+                    print(colored("  TLS verification failed (missing root certs?) — "
+                                  "continuing unverified. Use --insecure to silence.", C.YELLOW))
+                    self.insecure = True
+                    self._build_opener()
+                    continue
+                self.last_error = f"network error: {e.reason}"
                 if attempt < retries:
-                    time.sleep(1)
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                return None
+            except Exception as e:
+                self.last_error = f"{e.__class__.__name__}: {e}"
+                if attempt < retries:
+                    time.sleep(1.5 * (attempt + 1))
                     continue
                 return None
 
@@ -211,8 +267,13 @@ class SwiggySession:
             "?lat=12.93&lng=77.62&page_type=DESKTOP_WEB_LISTING"
         )
 
-        if not data or data.get("statusCode") != 0:
-            print(colored("  Session invalid or expired.", C.RED))
+        if not data:
+            reason = self.last_error or "no response"
+            print(colored(f"  Could not verify session: {reason}", C.RED))
+            return False
+        if data.get("statusCode") != 0:
+            msg = data.get("data", {}).get("statusMessage") or f"statusCode {data.get('statusCode')}"
+            print(colored(f"  Session invalid or expired ({msg}).", C.RED))
             return False
 
         self.logged_in = True
@@ -312,7 +373,11 @@ class SwiggySession:
             url += "&facets=catalog_cuisines%3AVeg"
 
         data = self.get(url)
-        if not data or data.get("statusCode") != 0:
+        if not data:
+            return []
+        if data.get("statusCode") != 0:
+            self.last_error = (data.get("data", {}).get("statusMessage")
+                               or f"statusCode {data.get('statusCode')}")
             return []
 
         # Update CSRF from response
@@ -446,7 +511,7 @@ class SwiggySession:
 
 
 # Global session instance
-session = SwiggySession()
+session = None  # created in main() once flags are known
 
 
 def _extract_menu_items(obj, items, depth=0, current_category=""):
@@ -655,16 +720,25 @@ def geocode_location(query):
     encoded = urllib.parse.quote(query + ", India")
     url = f"https://nominatim.openstreetmap.org/search?q={encoded}&format=json&limit=1"
     req = urllib.request.Request(url, headers={"User-Agent": "SwiggyDealsFinder/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=10, context=SSL_CTX) as resp:
-            results = json.loads(resp.read().decode())
-            if results:
-                display = results[0].get("display_name", query)
-                parts = display.split(",")
-                short = ", ".join(p.strip() for p in parts[:3])
-                return float(results[0]["lat"]), float(results[0]["lon"]), short
-    except Exception:
-        pass
+    for ctx in (build_ssl_context(), build_ssl_context(insecure=True)):
+        try:
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+                results = json.loads(resp.read().decode())
+                if results:
+                    display = results[0].get("display_name", query)
+                    parts = display.split(",")
+                    short = ", ".join(p.strip() for p in parts[:3])
+                    return float(results[0]["lat"]), float(results[0]["lon"]), short
+                print(colored(f"  No match for '{query}' on OpenStreetMap.", C.YELLOW))
+                return None, None, None
+        except urllib.error.URLError as e:
+            if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+                continue  # retry unverified
+            print(colored(f"  Geocoding failed: {e.reason}", C.YELLOW))
+            return None, None, None
+        except Exception as e:
+            print(colored(f"  Geocoding failed: {e.__class__.__name__}", C.YELLOW))
+            return None, None, None
     return None, None, None
 
 # ─── Display ──────────────────────────────────────────────────────────────────
@@ -1253,7 +1327,8 @@ def main():
         restaurants = session.fetch_restaurants(lat, lng, veg_only=use_veg_filter)
 
         if not restaurants:
-            print(colored("  No restaurants found. Swiggy may be blocking requests.", C.RED))
+            reason = session.last_error or "no restaurants in this area"
+            print(colored(f"  No restaurants found: {reason}", C.RED))
             print(colored("  Try again in a minute, or use lat,lng format.", C.DIM))
             sys.exit(1)
 
