@@ -332,6 +332,8 @@ class SwiggySession:
                     },
                     "page_type": "DESKTOP_WEB_LISTING",
                 }
+                if self.csrf_token:
+                    payload["_csrf"] = self.csrf_token
                 if veg_only:
                     payload["facets"] = {"catalog_cuisines": [{"value": "Veg"}]}
 
@@ -343,6 +345,8 @@ class SwiggySession:
                 if not page_data or page_data.get("statusCode") != 0:
                     break
 
+                if page_data.get("csrfToken"):
+                    self.csrf_token = page_data["csrfToken"]
                 new = self._collect_restaurants(page_data, seen, all_restaurants)
                 page_offset = page_data.get("data", {}).get("pageOffset", {})
 
