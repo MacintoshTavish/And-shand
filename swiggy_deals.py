@@ -617,12 +617,23 @@ AVG_DELIVERY_FEE = 25.0
 SMALL_ORDER_THRESHOLD = 150
 SMALL_ORDER_FEE = 30.0
 
-def estimate_checkout_price(discounted_price):
-    gst = discounted_price * GST_RATE
-    extras = PLATFORM_FEE + AVG_PACKAGING + AVG_DELIVERY_FEE
-    if discounted_price < SMALL_ORDER_THRESHOLD:
+def estimate_checkout_price(subtotal, delivery_fee=None, delivery_free=False):
+    """Subtotal + GST + platform/packaging/delivery fees + small-order fee.
+
+    delivery_fee: actual fee from Swiggy's payload when known, else the average.
+    delivery_free: restaurant is running a free-delivery offer that applies.
+    """
+    gst = subtotal * GST_RATE
+    if delivery_free:
+        delivery = 0.0
+    elif delivery_fee is not None:
+        delivery = delivery_fee
+    else:
+        delivery = AVG_DELIVERY_FEE
+    extras = PLATFORM_FEE + AVG_PACKAGING + delivery
+    if subtotal < SMALL_ORDER_THRESHOLD:
         extras += SMALL_ORDER_FEE
-    return discounted_price + gst + extras
+    return subtotal + gst + extras
 
 # ─── Geocoding ────────────────────────────────────────────────────────────────
 
@@ -717,14 +728,6 @@ def print_results(results, num_people):
     print(colored("    - Cart-level coupon codes (PARTY, WELCOME50, etc.)", C.DIM))
     print()
 
-def estimate_item_checkout(price):
-    """Estimate checkout price for a single item (GST + fees)."""
-    gst = price * GST_RATE
-    extras = PLATFORM_FEE + AVG_PACKAGING + AVG_DELIVERY_FEE
-    if price < SMALL_ORDER_THRESHOLD:
-        extras += SMALL_ORDER_FEE
-    return price + gst + extras
-
 def print_item_detail(item):
     """Show full details for a selected menu item with final price breakdown."""
     print()
@@ -773,7 +776,7 @@ def print_item_detail(item):
     # Price breakdown
     base_price = item["price"]
     gst = base_price * GST_RATE
-    total = estimate_item_checkout(base_price)
+    total = estimate_checkout_price(base_price)
 
     print(colored("  PRICE BREAKDOWN", C.BOLD))
     print(colored("  " + "─" * 40, C.DIM))
@@ -794,7 +797,7 @@ def print_item_detail(item):
         print(colored("  " + "─" * 40, C.DIM))
         for v in item["variants"]:
             default_tag = colored(" (default)", C.GREEN) if v.get("default") else ""
-            v_total = estimate_item_checkout(v["price"]) if v["price"] > 0 else total
+            v_total = estimate_checkout_price(v["price"]) if v["price"] > 0 else total
             price_str = f"₹{v['price']:.0f}" if v["price"] > 0 else "Base price"
             print(f"    {v['name']:<35} {colored(price_str, C.BOLD)}  →  est. {colored(f'~₹{v_total:.0f}', C.RED)}{default_tag}")
         print()
@@ -808,7 +811,7 @@ def print_item_detail(item):
             for ch in sorted(ag["choices"], key=lambda x: x["price"]):
                 vt2 = colored("[V]", C.GREEN) if ch["is_veg"] else colored("[N]", C.RED)
                 if ch["price"] > 0:
-                    addon_total = total + ch["price"] * 1.05  # addon also gets GST
+                    addon_total = estimate_checkout_price(base_price + ch["price"])
                     print(f"    {vt2} {ch['name']:<32} +₹{ch['price']:.0f}  (total → ~₹{addon_total:.0f})")
                 else:
                     print(f"    {vt2} {ch['name']:<32} FREE")
@@ -884,7 +887,7 @@ def print_menu(items, rest_info, veg_pref, num_people):
         for i, item in enumerate(sorted_items[:50], 1):
             name = item["name"][:38]
             price = item["price"]
-            est = estimate_item_checkout(price)
+            est = estimate_checkout_price(price)
             veg_tag = colored("[V]", C.GREEN) if item["is_veg"] else colored("[N]", C.RED)
 
             # Badges
