@@ -169,10 +169,11 @@ class SwiggySession:
                 if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError) \
                         and not self.insecure:
                     print(colored("  TLS verification failed (missing root certs?) — "
-                                  "continuing unverified. Use --insecure to silence.", C.YELLOW))
+                                  "continuing unverified. Use --insecure to silence.", C.YELLOW),
+                          file=sys.stderr)
                     self.insecure = True
                     self._build_opener()
-                    continue
+                    return self._request(url, data=data, method=method, retries=retries)
                 self.last_error = f"network error: {e.reason}"
                 if attempt < retries:
                     time.sleep(1.5 * (attempt + 1))
@@ -720,15 +721,16 @@ def geocode_location(query):
                     parts = display.split(",")
                     short = ", ".join(p.strip() for p in parts[:3])
                     return float(results[0]["lat"]), float(results[0]["lon"]), short
-                print(colored(f"  No match for '{query}' on OpenStreetMap.", C.YELLOW))
+                print(colored(f"  No match for '{query}' on OpenStreetMap.", C.YELLOW),
+                      file=sys.stderr)
                 return None, None, None
         except urllib.error.URLError as e:
             if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
                 continue  # retry unverified
-            print(colored(f"  Geocoding failed: {e.reason}", C.YELLOW))
+            print(colored(f"  Geocoding failed: {e.reason}", C.YELLOW), file=sys.stderr)
             return None, None, None
         except Exception as e:
-            print(colored(f"  Geocoding failed: {e.__class__.__name__}", C.YELLOW))
+            print(colored(f"  Geocoding failed: {e.__class__.__name__}", C.YELLOW), file=sys.stderr)
             return None, None, None
     return None, None, None
 
@@ -749,7 +751,8 @@ def print_results(results, num_people, limit=25):
         return
 
     print()
-    print(colored(f"  TOP CHEAPEST MEALS FOR {num_people} PEOPLE", C.BOLD + C.GREEN))
+    who = "1 PERSON" if num_people == 1 else f"{num_people} PEOPLE"
+    print(colored(f"  TOP CHEAPEST MEALS FOR {who}", C.BOLD + C.GREEN))
     print(colored("  " + "─" * 118, C.DIM))
     print()
 
@@ -1257,6 +1260,8 @@ def parse_args():
 def prompt_veg(default="both"):
     labels = {"veg": "1", "nonveg": "2", "both": "3"}
     names = {"1": "veg", "2": "nonveg", "3": "both"}
+    if default not in labels:
+        default = "both"
     print(f"    {colored('1', C.CYAN)} Veg only")
     print(f"    {colored('2', C.CYAN)} Non-veg only")
     print(f"    {colored('3', C.CYAN)} Both")
@@ -1340,7 +1345,7 @@ def main():
             "location": {"query": args.location, "resolved": place_name,
                          "lat": lat, "lng": lng},
             "people": num_people, "veg": veg_pref,
-            "error": session.last_error,
+            "error": session.last_error if not results else None,
             "results": results[:args.limit] if args.limit else results,
         }, ensure_ascii=False, indent=2))
         return
