@@ -25,8 +25,22 @@ class C:
     WHITE = "\033[97m"
     RESET = "\033[0m"
 
+USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
 def colored(text, color):
+    if not USE_COLOR:
+        return str(text)
     return f"{color}{text}{C.RESET}"
+
+def pad(text, width, color=None, align="<"):
+    """Truncate and pad plain text to a visible width, then color it.
+
+    Coloring after padding keeps ANSI escapes out of the width math,
+    so columns line up no matter which colors a row uses.
+    """
+    text = str(text)[:width]
+    text = f"{text:{align}{width}}"
+    return colored(text, color) if color else text
 
 # ─── SSL Context (macOS Python fix) ──────────────────────────────────────────
 
@@ -664,54 +678,41 @@ def print_header():
     print(f"  {status}")
     print()
 
-def print_results(results, num_people):
+def print_results(results, num_people, limit=25):
     if not results:
         print(colored("\n  No results found matching your criteria.\n", C.YELLOW))
         return
 
     print()
     print(colored(f"  TOP CHEAPEST MEALS FOR {num_people} PEOPLE", C.BOLD + C.GREEN))
-    print(colored("  " + "─" * 90, C.DIM))
+    print(colored("  " + "─" * 118, C.DIM))
     print()
 
-    print(f"  {colored('#', C.DIM):>12}  "
-          f"{colored('Restaurant', C.BOLD):<28}  "
-          f"{colored('Cuisines', C.DIM):<24}  "
-          f"{colored('Offer', C.YELLOW):<28}  "
-          f"{colored('For ' + str(num_people), C.DIM):<14}  "
-          f"{colored('After Disc.', C.GREEN):<18}  "
-          f"{colored('Est. Total*', C.RED):<18}  "
-          f"{colored('Save', C.MAGENTA):<14}  "
-          f"{colored('Time', C.CYAN)}")
-    print(f"  {'':>4}  {'─'*24}  {'─'*20}  {'─'*24}  {'─'*10}  {'─'*12}  {'─'*12}  {'─'*10}  {'─'*6}")
+    cols = [("#", 4), ("Restaurant", 24), ("Cuisines", 20), ("Offer", 24),
+            (f"For {num_people}", 8), ("After Disc.", 11), ("Est. Total*", 11),
+            ("Save", 8), ("Time", 6)]
+    print("  " + "  ".join(pad(h, w, C.BOLD) for h, w in cols))
+    print("  " + "  ".join("─" * w for _, w in cols))
 
-    for i, r in enumerate(results[:25], 1):
-        name = r["name"][:24]
-        cuisines = r.get("cuisines", "")[:20]
-        offer = r.get("offer_text", "—")[:24]
-        original = f"₹{r['original_price']:.0f}"
-        final = f"₹{r['final_price']:.0f}"
-        est = f"~₹{r['est_checkout']:.0f}"
+    for i, r in enumerate(results[:limit], 1):
+        offer = r.get("offer_text", "—")
         save = f"₹{r['savings']:.0f}" if r['savings'] > 0 else "—"
-        dt = r.get("delivery_time", "?")
-
-        offer_c = colored(offer, C.YELLOW) if offer != "—" else colored("—", C.DIM)
-        final_c = colored(final, C.GREEN + C.BOLD)
-        est_c = colored(est, C.RED)
-        save_c = colored(save, C.MAGENTA) if save != "—" else colored("—", C.DIM)
-
-        print(f"  {colored(str(i), C.DIM):>12}  "
-              f"{name:<28}  "
-              f"{colored(cuisines, C.DIM):<33}  "
-              f"{offer_c:<37}  "
-              f"{colored(original, C.DIM):<23}  "
-              f"{final_c:<27}  "
-              f"{est_c:<27}  "
-              f"{save_c:<23}  "
-              f"{colored(str(dt) + 'm', C.CYAN)}")
+        row = [
+            pad(i, 4, C.DIM),
+            pad(r["name"], 24),
+            pad(r.get("cuisines", ""), 20, C.DIM),
+            pad(offer, 24, C.YELLOW if offer != "—" else C.DIM),
+            pad(f"₹{r['original_price']:.0f}", 8, C.DIM),
+            pad(f"₹{r['final_price']:.0f}", 11, C.GREEN + C.BOLD),
+            pad(f"~₹{r['est_checkout']:.0f}", 11, C.RED),
+            pad(save, 8, C.MAGENTA if save != "—" else C.DIM),
+            pad(f"{r.get('delivery_time', '?')}m", 6, C.CYAN),
+        ]
+        print("  " + "  ".join(row))
 
     print()
-    print(colored(f"  Showing {min(len(results), 25)} of {len(results)} results", C.DIM))
+    print(colored(f"  Showing {min(len(results), limit)} of {len(results)} results"
+                  + ("  ('m' for more)" if len(results) > limit else ""), C.DIM))
     print()
 
     print(colored("  " + "─" * 90, C.DIM))
@@ -852,6 +853,7 @@ def print_menu(items, rest_info, veg_pref, num_people):
 
     cat_names = sorted(categories.keys())
     active_category = None  # None = show all
+    item_cap = 50
 
     while True:
         # Determine which items to show
@@ -881,11 +883,12 @@ def print_menu(items, rest_info, veg_pref, num_people):
         print()
 
         # ── Item list with est. total ──
-        print(f"    {'#':>3}  {'Item':<38}  {'Price':>8}  {'Est.Total':>10}  {'':>4}  {'Rating':>8}  {'Info'}")
-        print(f"    {'─'*3}  {'─'*38}  {'─'*8}  {'─'*10}  {'─'*4}  {'─'*8}  {'─'*20}")
+        print("    " + "  ".join([pad("#", 3, C.BOLD, ">"), pad("Item", 38, C.BOLD),
+                                  pad("Price", 8, C.BOLD, ">"), pad("Est.Total", 10, C.BOLD, ">"),
+                                  pad("", 3), pad("Rating", 10, C.BOLD), "Info"]))
+        print(f"    {'─'*3}  {'─'*38}  {'─'*8}  {'─'*10}  {'─'*3}  {'─'*10}  {'─'*20}")
 
-        for i, item in enumerate(sorted_items[:50], 1):
-            name = item["name"][:38]
+        for i, item in enumerate(sorted_items[:item_cap], 1):
             price = item["price"]
             est = estimate_checkout_price(price)
             veg_tag = colored("[V]", C.GREEN) if item["is_veg"] else colored("[N]", C.RED)
@@ -908,15 +911,18 @@ def print_menu(items, rest_info, veg_pref, num_people):
                 if item.get("rating_count"):
                     rating_str += f"({item['rating_count']})"
 
-            print(f"    {colored(str(i), C.CYAN):>12}  {name:<38}  "
-                  f"{colored(f'₹{price:.0f}', C.BOLD):>17}  "
-                  f"{colored(f'~₹{est:.0f}', C.RED):>19}  "
-                  f"{veg_tag}  "
-                  f"{colored(rating_str, C.DIM):>8}  "
-                  f"{info_str}")
+            print("    " + "  ".join([
+                pad(i, 3, C.CYAN, ">"),
+                pad(item["name"], 38),
+                pad(f"₹{price:.0f}", 8, C.BOLD, ">"),
+                pad(f"~₹{est:.0f}", 10, C.RED, ">"),
+                veg_tag,
+                pad(rating_str, 10, C.DIM),
+                info_str,
+            ]))
 
-        if len(sorted_items) > 50:
-            print(colored(f"\n    ... and {len(sorted_items) - 50} more items", C.DIM))
+        if len(sorted_items) > item_cap:
+            print(colored(f"\n    ... and {len(sorted_items) - item_cap} more items ('m' shows more)", C.DIM))
 
         # ── Cheapest combo suggestion ──
         print()
@@ -950,11 +956,14 @@ def print_menu(items, rest_info, veg_pref, num_people):
             print(f"    {'    '.join(row)}")
 
         # ── Actions ──
+        shown = min(len(sorted_items), item_cap)
         print()
         print(colored("  Actions:", C.BOLD))
-        print(f"    {colored('1-' + str(min(len(sorted_items), 50)), C.CYAN)}  — Select item to see full details + final price")
+        print(f"    {colored('1-' + str(shown), C.CYAN)}  — Select item to see full details + final price")
         print(f"    {colored('c1-c' + str(len(cat_names)), C.CYAN)} — Filter by category (e.g. c1, c3)")
         print(f"    {colored('a', C.CYAN)}    — Show all categories")
+        if len(sorted_items) > item_cap:
+            print(f"    {colored('m', C.CYAN)}    — Show more items")
         print(f"    {colored('Enter', C.CYAN)}  — Back to restaurant list")
         print()
 
@@ -979,18 +988,22 @@ def print_menu(items, rest_info, veg_pref, num_people):
             active_category = None
             continue
 
+        if choice == "m":
+            item_cap += 50
+            continue
+
         # Item selection
         try:
             idx = int(choice)
-            if 1 <= idx <= min(len(sorted_items), 50):
+            if 1 <= idx <= shown:
                 print_item_detail(sorted_items[idx - 1])
                 input(colored("  Press Enter to go back...", C.DIM))
             else:
-                print(colored(f"  Pick 1 to {min(len(sorted_items), 50)}.", C.RED))
+                print(colored(f"  Pick 1 to {shown}.", C.RED))
         except ValueError:
-            print(colored("  Invalid. Use a number, c1-c#, a, or Enter.", C.RED))
+            print(colored("  Invalid. Use a number, c1-c#, a, m, or Enter.", C.RED))
 
-def filter_loop(results, num_people, lat, lng, veg_pref):
+def filter_loop(results, num_people, lat, lng, veg_pref, limit=25):
     budget_limit = None
     restaurant_filter = None
 
@@ -1002,7 +1015,7 @@ def filter_loop(results, num_people, lat, lng, veg_pref):
             display = [r for r in display if r["est_checkout"] <= budget_limit]
 
         display.sort(key=lambda x: x["est_checkout"])
-        print_results(display, num_people)
+        print_results(display, num_people, limit)
 
         active = []
         if restaurant_filter:
@@ -1013,12 +1026,16 @@ def filter_loop(results, num_people, lat, lng, veg_pref):
             print(colored(f"  Active filters: {', '.join(active)}", C.DIM))
             print()
 
+        shown = min(len(display), limit)
         print(colored("  What next?", C.BOLD))
-        print(f"    {colored('1-' + str(len(display)), C.CYAN)} — Enter a number to see full menu")
+        print(f"    {colored('1-' + str(shown), C.CYAN)} — Enter a number to see full menu")
         print(f"    {colored('f', C.CYAN)}   — Filter by restaurant name")
         print(f"    {colored('b', C.CYAN)}   — Set max budget (filters by Est. Total)")
         print(f"    {colored('s', C.CYAN)}   — Show all / clear filters")
+        if len(display) > limit:
+            print(f"    {colored('m', C.CYAN)}   — Show more results")
         print(f"    {colored('v', C.CYAN)}   — Change veg/non-veg (re-fetch)")
+        print(f"    {colored('n', C.CYAN)}   — New location / party size")
         if not session.logged_in:
             print(f"    {colored('l', C.CYAN)}   — Login to Swiggy (more restaurants + offers)")
         else:
@@ -1030,7 +1047,7 @@ def filter_loop(results, num_people, lat, lng, veg_pref):
 
         try:
             idx = int(choice)
-            if 1 <= idx <= len(display):
+            if 1 <= idx <= shown:
                 selected = display[idx - 1]
                 rest_id = selected.get("rest_id")
                 if not rest_id:
@@ -1044,7 +1061,7 @@ def filter_loop(results, num_people, lat, lng, veg_pref):
                     print(colored("  Could not fetch menu.", C.RED))
                 continue
             else:
-                print(colored(f"  Pick a number between 1 and {len(display)}.", C.RED))
+                print(colored(f"  Pick a number between 1 and {shown}.", C.RED))
                 continue
         except ValueError:
             pass
@@ -1061,8 +1078,12 @@ def filter_loop(results, num_people, lat, lng, veg_pref):
             budget_limit = None
             restaurant_filter = None
             print(colored("  Filters cleared, showing all.", C.GREEN))
+        elif choice == "m":
+            limit += 25
         elif choice == "v":
             return "refetch"
+        elif choice == "n":
+            return "newsearch"
         elif choice == "l":
             if session.logged_in:
                 session.logout()
@@ -1073,7 +1094,7 @@ def filter_loop(results, num_people, lat, lng, veg_pref):
             print(colored("\n  Happy eating!\n", C.GREEN))
             return "quit"
         else:
-            print(colored("  Invalid choice. Enter a number to view menu, or f/b/s/v/l/q.", C.RED))
+            print(colored("  Invalid choice. Enter a number to view menu, or f/b/s/m/v/n/l/q.", C.RED))
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
