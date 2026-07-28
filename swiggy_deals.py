@@ -621,7 +621,7 @@ def parse_discount(discount_info):
         return result
 
     pct_h = re.search(r'(\d+)%\s*OFF', text)
-    cap_s = re.search(r'UPTO\s*₹?\s*(\d+)', text)
+    cap_s = re.search(r'(?:UPTO|UP\s*TO)\s*₹?\s*(\d+)', text)
     if pct_h and cap_s:
         result["type"] = "percent_capped"
         result["percent"] = int(pct_h.group(1))
@@ -650,7 +650,7 @@ def parse_discount(discount_info):
     result["type"] = "unknown"
     return result
 
-def apply_discount(original_price, discount):
+def apply_discount(original_price, discount, num_items=2):
     """Calculate price after applying discount. Returns (final_price, savings)."""
     if not discount or discount["type"] is None or discount["type"] in ("unknown", "free_delivery"):
         return original_price, 0
@@ -674,7 +674,9 @@ def apply_discount(original_price, discount):
         return original_price - saving, saving
 
     if discount["type"] == "bogo":
-        saving = original_price * 0.5
+        # one free item per pair — 3 people pay for 2, not 1.5
+        free_fraction = (num_items // 2) / num_items if num_items >= 1 else 0.5
+        saving = original_price * free_fraction
         return original_price - saving, saving
 
     return original_price, 0
@@ -797,8 +799,9 @@ def print_results(results, num_people, limit=25):
     print(colored("    - Cart-level coupon codes (PARTY, WELCOME50, etc.)", C.DIM))
     print()
 
-def print_item_detail(item):
+def print_item_detail(item, fee_ctx=None):
     """Show full details for a selected menu item with final price breakdown."""
+    fee_ctx = fee_ctx or {}
     print()
     print(colored("  " + "━" * 70, C.YELLOW))
 
@@ -845,7 +848,7 @@ def print_item_detail(item):
     # Price breakdown
     base_price = item["price"]
     gst = base_price * GST_RATE
-    total = estimate_checkout_price(base_price)
+    total = estimate_checkout_price(base_price, **fee_ctx)
 
     print(colored("  PRICE BREAKDOWN", C.BOLD))
     print(colored("  " + "─" * 40, C.DIM))
@@ -853,7 +856,13 @@ def print_item_detail(item):
     print(f"    GST (5%):            {colored(f'₹{gst:.0f}', C.DIM)}")
     print(f"    Platform fee:        {colored(f'~₹{PLATFORM_FEE:.0f}', C.DIM)}")
     print(f"    Packaging:           {colored(f'~₹{AVG_PACKAGING:.0f}', C.DIM)}")
-    print(f"    Delivery:            {colored(f'~₹{AVG_DELIVERY_FEE:.0f}', C.DIM)}")
+    if fee_ctx.get("delivery_free"):
+        print(f"    Delivery:            {colored('FREE (offer)', C.GREEN)}")
+    elif fee_ctx.get("delivery_fee") is not None:
+        fee = fee_ctx["delivery_fee"]
+        print(f"    Delivery:            {colored(f'₹{fee:.0f}', C.DIM)}")
+    else:
+        print(f"    Delivery:            {colored(f'~₹{AVG_DELIVERY_FEE:.0f}', C.DIM)}")
     if base_price < SMALL_ORDER_THRESHOLD:
         print(f"    Small order fee:     {colored(f'₹{SMALL_ORDER_FEE:.0f}', C.RED)}")
     print(colored("  " + "─" * 40, C.DIM))
@@ -866,7 +875,7 @@ def print_item_detail(item):
         print(colored("  " + "─" * 40, C.DIM))
         for v in item["variants"]:
             default_tag = colored(" (default)", C.GREEN) if v.get("default") else ""
-            v_total = estimate_checkout_price(v["price"]) if v["price"] > 0 else total
+            v_total = estimate_checkout_price(v["price"], **fee_ctx) if v["price"] > 0 else total
             price_str = f"₹{v['price']:.0f}" if v["price"] > 0 else "Base price"
             print(f"    {v['name']:<35} {colored(price_str, C.BOLD)}  →  est. {colored(f'~₹{v_total:.0f}', C.RED)}{default_tag}")
         print()
@@ -880,7 +889,7 @@ def print_item_detail(item):
             for ch in sorted(ag["choices"], key=lambda x: x["price"]):
                 vt2 = colored("[V]", C.GREEN) if ch["is_veg"] else colored("[N]", C.RED)
                 if ch["price"] > 0:
-                    addon_total = estimate_checkout_price(base_price + ch["price"])
+                    addon_total = estimate_checkout_price(base_price + ch["price"], **fee_ctx)
                     print(f"    {vt2} {ch['name']:<32} +₹{ch['price']:.0f}  (total → ~₹{addon_total:.0f})")
                 else:
                     print(f"    {vt2} {ch['name']:<32} FREE")
@@ -889,8 +898,9 @@ def print_item_detail(item):
     print(colored("  " + "━" * 70, C.YELLOW))
 
 
-def print_menu(items, rest_info, veg_pref, num_people):
+def print_menu(items, rest_info, veg_pref, num_people, fee_ctx=None):
     """Interactive menu viewer with category filtering and item selection."""
+    fee_ctx = fee_ctx or {}
 
     # Apply veg filter once
     if veg_pref == "veg":
@@ -958,7 +968,7 @@ def print_menu(items, rest_info, veg_pref, num_people):
 
         for i, item in enumerate(sorted_items[:item_cap], 1):
             price = item["price"]
-            est = estimate_checkout_price(price)
+            est = estimate_checkout_price(price, **fee_ctx)
             veg_tag = colored("[V]", C.GREEN) if item["is_veg"] else colored("[N]", C.RED)
 
             # Badges
@@ -997,7 +1007,7 @@ def print_menu(items, rest_info, veg_pref, num_people):
         print(colored("  " + "─" * 70, C.DIM))
         combo = sorted_items[:num_people]
         combo_total = sum(item["price"] for item in combo)
-        combo_est = estimate_checkout_price(combo_total)
+        combo_est = estimate_checkout_price(combo_total, **fee_ctx)
         print(colored(f"  Cheapest combo for {num_people} (1 item each):", C.BOLD + C.GREEN))
         for item in combo:
             vt = colored("[V]", C.GREEN) if item["is_veg"] else colored("[N]", C.RED)
@@ -1064,7 +1074,7 @@ def print_menu(items, rest_info, veg_pref, num_people):
         try:
             idx = int(choice)
             if 1 <= idx <= shown:
-                print_item_detail(sorted_items[idx - 1])
+                print_item_detail(sorted_items[idx - 1], fee_ctx)
                 input(colored("  Press Enter to go back...", C.DIM))
             else:
                 print(colored(f"  Pick 1 to {shown}.", C.RED))
@@ -1124,7 +1134,9 @@ def filter_loop(results, num_people, lat, lng, veg_pref, limit=25):
                 print(colored(f"\n  Fetching menu for {selected['name']}...", C.YELLOW))
                 items, rest_info = session.fetch_menu(rest_id, lat, lng)
                 if items:
-                    print_menu(items, rest_info, veg_pref, num_people)
+                    fee_ctx = {"delivery_fee": selected.get("delivery_fee"),
+                               "delivery_free": selected.get("delivery_free", False)}
+                    print_menu(items, rest_info, veg_pref, num_people, fee_ctx)
                 else:
                     print(colored("  Could not fetch menu.", C.RED))
                 continue
@@ -1208,10 +1220,13 @@ def process_restaurants(restaurants, num_people, veg_pref):
 
         if discount and discount["type"] == "items_at":
             items_price = discount["items_at"] * num_people
-            final = items_price
-            savings = original - items_price if original > items_price else 0
+            if items_price >= discount.get("min_order", 0):
+                final = items_price
+                savings = original - items_price if original > items_price else 0
+            else:
+                final, savings = original, 0
         else:
-            final, savings = apply_discount(original, discount)
+            final, savings = apply_discount(original, discount, num_items=num_people)
 
         delivery_free = bool(
             discount and discount["type"] == "free_delivery"
@@ -1230,6 +1245,7 @@ def process_restaurants(restaurants, num_people, veg_pref):
             "savings": savings,
             "offer_text": offer_text,
             "delivery_fee": delivery_fee,
+            "delivery_free": delivery_free,
             "delivery_time": sla.get("deliveryTime", "?"),
             "cuisines": cuisines,
             "rating": rest.get("avgRating", "?"),
