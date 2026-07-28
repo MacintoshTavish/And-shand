@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Swiggy Cheapest Deals Finder — Interactive CLI with login support."""
 
+import argparse
 import http.cookiejar
 import json
 import os
@@ -387,8 +388,8 @@ class SwiggySession:
         page_offset = data.get("data", {}).get("pageOffset", {})
         new = self._collect_restaurants(data, seen, all_restaurants)
 
-        sys.stdout.write(f"\r  Page 1: {new} restaurants found")
-        sys.stdout.flush()
+        sys.stderr.write(f"\r  Page 1: {new} restaurants found")
+        sys.stderr.flush()
 
         # Paginate if logged in and more pages available
         if self.logged_in and page_offset.get("nextOffset"):
@@ -429,8 +430,8 @@ class SwiggySession:
                 new = self._collect_restaurants(page_data, seen, all_restaurants)
                 page_offset = page_data.get("data", {}).get("pageOffset", {})
 
-                sys.stdout.write(f"\r  Page {page_num}: +{new} restaurants (total: {len(all_restaurants)})")
-                sys.stdout.flush()
+                sys.stderr.write(f"\r  Page {page_num}: +{new} restaurants (total: {len(all_restaurants)})")
+                sys.stderr.flush()
 
                 if new == 0:
                     break
@@ -454,7 +455,7 @@ class SwiggySession:
                         break
                 time.sleep(0.3)
 
-        print()  # Newline after progress
+        sys.stderr.write("\n")
         return all_restaurants
 
     def _collect_restaurants(self, data, seen, results):
@@ -1244,81 +1245,170 @@ def process_restaurants(restaurants, num_people, veg_pref):
     results.sort(key=lambda x: x["est_checkout"])
     return results, skipped_closed
 
+def parse_args():
+    ap = argparse.ArgumentParser(
+        prog="swiggy_deals.py",
+        description="Find the cheapest Swiggy meals near you, sorted by "
+                    "estimated checkout price.")
+    ap.add_argument("-l", "--location", help="area name or lat,lng")
+    ap.add_argument("-p", "--people", type=int, help="number of people eating")
+    ap.add_argument("--veg", choices=["veg", "nonveg", "both"], help="food preference")
+    ap.add_argument("-r", "--restaurant", help="only restaurants whose name contains this")
+    ap.add_argument("--limit", type=int, default=25, help="rows to show (default 25)")
+    ap.add_argument("--json", action="store_true",
+                    help="print results as JSON and exit (needs --location)")
+    ap.add_argument("--no-color", action="store_true", help="disable colored output")
+    ap.add_argument("--insecure", action="store_true",
+                    help="skip TLS certificate verification")
+    ap.add_argument("--login", action="store_true", help="run the login flow and exit")
+    ap.add_argument("--logout", action="store_true", help="clear the saved session and exit")
+    return ap.parse_args()
+
+def prompt_veg(default="both"):
+    labels = {"veg": "1", "nonveg": "2", "both": "3"}
+    names = {"1": "veg", "2": "nonveg", "3": "both"}
+    print(f"    {colored('1', C.CYAN)} Veg only")
+    print(f"    {colored('2', C.CYAN)} Non-veg only")
+    print(f"    {colored('3', C.CYAN)} Both")
+    pref_input = input(f"  Choice [{labels[default]}]: ").strip()
+    return names.get(pref_input, default)
+
+def resolve_location(loc_input):
+    """lat,lng string or area name -> (lat, lng, display_name) or Nones."""
+    if "," in loc_input:
+        parts = loc_input.split(",")
+        try:
+            return float(parts[0].strip()), float(parts[1].strip()), loc_input
+        except ValueError:
+            pass
+    print(colored("  Geocoding...", C.DIM), file=sys.stderr)
+    return geocode_location(loc_input)
+
+def ask_location(cfg):
+    saved = cfg.get("location", "")
+    hint = f" [{saved}]" if saved else ""
+    for _ in range(3):
+        loc_input = input(f"  Enter lat,lng or area name{hint}: ").strip() or saved
+        if not loc_input:
+            print(colored("  A location is needed to search.", C.YELLOW))
+            continue
+        lat, lng, place_name = resolve_location(loc_input)
+        if lat is not None:
+            cfg["location"] = loc_input
+            return lat, lng, place_name
+        print(colored("  Could not find that location. Try lat,lng format.", C.RED))
+    sys.exit(1)
+
+def ask_people(cfg):
+    saved = cfg.get("people", 2)
+    while True:
+        raw = input(f"  Number of people eating [{saved}]: ").strip()
+        if not raw:
+            return saved
+        try:
+            n = int(raw)
+            if n >= 1:
+                cfg["people"] = n
+                return n
+            print(colored("  At least 1 person.", C.YELLOW))
+        except ValueError:
+            print(colored("  Enter a number.", C.YELLOW))
+
 def main():
+    global session, USE_COLOR
+    args = parse_args()
+    if args.no_color:
+        USE_COLOR = False
+
+    session = SwiggySession(insecure=args.insecure)
+    cfg = load_config()
+
+    if args.logout:
+        session.logout()
+        return
+    if args.login:
+        session.login()
+        return
+
+    # ── Non-interactive: --json ──
+    if args.json:
+        if not args.location:
+            print("--json needs --location", file=sys.stderr)
+            sys.exit(2)
+        lat, lng, place_name = resolve_location(args.location)
+        if lat is None:
+            print("could not resolve location", file=sys.stderr)
+            sys.exit(1)
+        num_people = args.people or cfg.get("people", 2)
+        veg_pref = args.veg or "both"
+        restaurants = session.fetch_restaurants(lat, lng, veg_only=veg_pref == "veg")
+        if args.restaurant:
+            restaurants = [r for r in restaurants
+                           if args.restaurant.lower() in r.get("name", "").lower()]
+        results, _ = process_restaurants(restaurants, num_people, veg_pref)
+        print(json.dumps({
+            "location": {"query": args.location, "resolved": place_name,
+                         "lat": lat, "lng": lng},
+            "people": num_people, "veg": veg_pref,
+            "error": session.last_error,
+            "results": results[:args.limit] if args.limit else results,
+        }, ensure_ascii=False, indent=2))
+        return
+
     print_header()
 
-    # ── Login prompt ──
-    if not session.logged_in:
+    # ── Login prompt (remembered once declined) ──
+    if not session.logged_in and not cfg.get("skip_login_prompt"):
         print(colored("  Tip: Login for more restaurants & personalized offers", C.DIM))
         login_choice = input(colored("  Login now? (y/N): ", C.BOLD)).strip().lower()
         if login_choice == "y":
             session.login()
+        else:
+            cfg["skip_login_prompt"] = True
+            print(colored("  Won't ask again — run with --login when you want it.", C.DIM))
         print()
-    else:
+    elif session.logged_in:
         print(colored("  Using saved Swiggy session.", C.GREEN))
         print()
 
     # ── Step 1: Location ──
     print(colored("  Step 1: Location", C.BOLD))
-    loc_input = input("  Enter lat,lng or area name: ").strip()
-
-    if not loc_input:
-        print(colored("  No location provided. Exiting.", C.RED))
-        sys.exit(1)
-
-    lat, lng, place_name = None, None, None
-    if "," in loc_input:
-        parts = loc_input.split(",")
-        try:
-            lat, lng = float(parts[0].strip()), float(parts[1].strip())
-            place_name = loc_input
-        except ValueError:
-            pass
-
-    if lat is None:
-        print(colored("  Geocoding...", C.DIM))
-        lat, lng, place_name = geocode_location(loc_input)
-
-    if lat is None:
-        print(colored("  Could not find that location. Try lat,lng format.", C.RED))
-        sys.exit(1)
-
+    if args.location:
+        lat, lng, place_name = resolve_location(args.location)
+        if lat is None:
+            sys.exit(1)
+        cfg["location"] = args.location
+    else:
+        lat, lng, place_name = ask_location(cfg)
     print(colored(f"  > {place_name} ({lat:.4f}, {lng:.4f})", C.GREEN))
     print()
 
     # ── Step 2: Number of people ──
     print(colored("  Step 2: How many people?", C.BOLD))
-    try:
-        num_people = int(input("  Number of people eating: ").strip() or "2")
-        if num_people < 1:
-            num_people = 2
-    except ValueError:
-        num_people = 2
+    num_people = args.people if args.people and args.people >= 1 else ask_people(cfg)
     print(colored(f"  > {num_people} people", C.GREEN))
     print()
 
     # ── Step 3: Veg/Non-veg ──
     print(colored("  Step 3: Food preference", C.BOLD))
-    print(f"    {colored('1', C.CYAN)} Veg only")
-    print(f"    {colored('2', C.CYAN)} Non-veg only")
-    print(f"    {colored('3', C.CYAN)} Both (default)")
-    veg_pref = "both"
-    pref_input = input("  Choice [3]: ").strip()
-    if pref_input == "1":
-        veg_pref = "veg"
-    elif pref_input == "2":
-        veg_pref = "nonveg"
+    veg_pref = args.veg or prompt_veg(cfg.get("veg", "both"))
+    cfg["veg"] = veg_pref
     print(colored(f"  > {veg_pref}", C.GREEN))
     print()
 
     # ── Step 4: Restaurant preference ──
     print(colored("  Step 4: Restaurant preference", C.BOLD))
-    rest_pref = input("  Restaurant name (Enter to skip): ").strip()
+    if args.restaurant is not None:
+        rest_pref = args.restaurant
+    else:
+        rest_pref = input("  Restaurant name (Enter to skip): ").strip()
     if rest_pref:
         print(colored(f"  > Searching for '{rest_pref}'", C.GREEN))
     else:
         print(colored("  > No preference", C.GREEN))
     print()
+
+    save_config(cfg)
 
     # ── Fetch & Process loop ──
     while True:
@@ -1336,15 +1426,16 @@ def main():
         if not session.logged_in:
             print(colored("  (Login for more — press 'l' in the menu)", C.DIM))
 
+        filtered = restaurants
         if rest_pref:
             matches = [r for r in restaurants if rest_pref.lower() in r.get("name", "").lower()]
             if matches:
                 print(colored(f"  {len(matches)} match '{rest_pref}'", C.GREEN))
-                restaurants = matches
+                filtered = matches
             else:
                 print(colored(f"  No matches for '{rest_pref}', showing all", C.YELLOW))
 
-        results, skipped_closed = process_restaurants(restaurants, num_people, veg_pref)
+        results, skipped_closed = process_restaurants(filtered, num_people, veg_pref)
         if skipped_closed:
             print(colored(f"  Skipped {skipped_closed} closed/unserviceable restaurants", C.DIM))
 
@@ -1352,23 +1443,27 @@ def main():
             print(colored("  No results after filtering.", C.RED))
             sys.exit(1)
 
-        action = filter_loop(results, num_people, lat, lng, veg_pref)
+        action = filter_loop(results, num_people, lat, lng, veg_pref, limit=args.limit)
         if action == "refetch":
             print()
             print(colored("  Food preference:", C.BOLD))
-            print(f"    {colored('1', C.CYAN)} Veg only")
-            print(f"    {colored('2', C.CYAN)} Non-veg only")
-            print(f"    {colored('3', C.CYAN)} Both")
-            pref_input = input("  Choice [3]: ").strip()
-            if pref_input == "1":
-                veg_pref = "veg"
-            elif pref_input == "2":
-                veg_pref = "nonveg"
-            else:
-                veg_pref = "both"
+            veg_pref = prompt_veg(veg_pref)
+            continue
+        elif action == "newsearch":
+            print()
+            print(colored("  New search", C.BOLD))
+            lat, lng, place_name = ask_location(cfg)
+            print(colored(f"  > {place_name} ({lat:.4f}, {lng:.4f})", C.GREEN))
+            num_people = ask_people(cfg)
+            print(colored(f"  > {num_people} people", C.GREEN))
+            save_config(cfg)
             continue
         else:
             break
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (KeyboardInterrupt, EOFError):
+        print(colored("\n\n  Bye!\n", C.DIM))
+        sys.exit(0)
